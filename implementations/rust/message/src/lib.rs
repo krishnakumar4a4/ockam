@@ -6,6 +6,8 @@
 
 pub mod message {
     use crate::message::Address::ChannelAddress;
+    use crate::message::MessageType::Payload;
+    use hex::*;
     use std::convert::{Into, TryFrom};
     use std::error::Error;
     use std::fmt::Formatter;
@@ -29,7 +31,18 @@ pub mod message {
     pub struct Message {
         pub onward_route: Route,
         pub return_route: Route,
+        pub message_type: MessageType,
         pub message_body: Vec<u8>,
+    }
+
+    #[repr(u8)]
+    pub enum MessageType {
+        Ping = 0,
+        Pong = 1,
+        Payload = 2,
+        KeyAgreementM1 = 3,
+        KeyAgreementM2 = 4,
+        KeyAgreementM3 = 5,
     }
 
     impl Default for Message {
@@ -37,6 +50,7 @@ pub mod message {
             Message {
                 onward_route: Route { addresses: vec![] },
                 return_route: Route { addresses: vec![] },
+                message_type: Payload,
                 message_body: vec![0],
             }
         }
@@ -45,15 +59,17 @@ pub mod message {
     impl Codec for Message {
         type Inner = Message;
         fn encode(msg: Message, u: &mut Vec<u8>) -> Result<(), String> {
+            u.push(1);
             Route::encode(msg.onward_route, u);
             Route::encode(msg.return_route, u);
+            u.push(msg.message_type as u8);
             u.extend(&msg.message_body[0..]);
             Ok(())
         }
 
         fn decode(u: &[u8]) -> Result<(Message, &[u8]), String> {
             let mut msg = Message::default();
-            let mut w = u;
+            let mut w = &u[1..];
             match Route::decode(w) {
                 Ok((r, u1)) => {
                     msg.onward_route = r;
@@ -72,8 +88,9 @@ pub mod message {
                     return Err(s);
                 }
             }
-
-            msg.message_body.append(&mut (w.to_vec()));
+            msg.message_type = MessageType::try_from(w[0])?;
+            let mut w = &w[1..];
+            msg.message_body = w.to_vec();
             Ok((msg, w))
         }
     }
@@ -81,7 +98,7 @@ pub mod message {
     /* Addresses */
     #[derive(Debug, PartialEq)]
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     pub struct RouterAddress {
         pub a_type: AddressType,
         pub length: u8,
@@ -91,41 +108,40 @@ pub mod message {
     impl Clone for AddressType {
         fn clone(&self) -> Self {
             match self {
-                AddressType::Local => AddressType::Local,
+                //                AddressType::Local => AddressType::Local,
                 AddressType::Tcp => AddressType::Tcp,
                 AddressType::Udp => AddressType::Udp,
                 AddressType::Channel => AddressType::Channel,
+                AddressType::Worker => AddressType::Worker,
                 AddressType::Undefined => AddressType::Undefined,
             }
         }
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy, Debug, PartialEq)]
+    //    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[derive(Clone, Debug, PartialEq)]
     pub enum Address {
-        LocalAddress(LocalAddress),
+        //        LocalAddress(u32),
         TcpAddress(IpAddr, u16),
         UdpAddress(SocketAddr),
-        ChannelAddress(u32),
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    pub struct LocalAddress {
-        pub address: u32,
+        ChannelAddress(Vec<u8>),
+        WorkerAddress(Vec<u8>),
     }
 
     impl Address {
         pub fn as_string(&self) -> String {
             match self {
                 Address::UdpAddress(socket) => socket.to_string(),
+                Address::ChannelAddress(u) => hex::encode(u.as_slice()),
                 _ => "error".to_string(),
             }
         }
         pub fn size_of(&self) -> u8 {
             match self {
-                Address::LocalAddress(a) => 4,
+                Address::WorkerAddress(a) => a.len() as u8,
                 Address::UdpAddress(s) => 7,
-                Address::ChannelAddress(a) => 4,
+                Address::ChannelAddress(a) => a.len() as u8,
                 _ => 0,
             }
         }
@@ -140,19 +156,20 @@ pub mod message {
     #[repr(u8)]
     pub enum AddressType {
         Undefined = 255,
-        Local = 0,
+        //        Local = 130,
         Tcp = 1,
         Udp = 2,
         Channel = 129,
+        Worker = 0,
     }
 
     impl std::fmt::Debug for AddressType {
         fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
             let s: String;
             match self {
-                AddressType::Local => {
-                    s = "local".to_string();
-                }
+                // AddressType::Local => {
+                //     s = "local".to_string();
+                // }
                 AddressType::Tcp => {
                     s = "Tcp".to_string();
                 }
@@ -161,6 +178,9 @@ pub mod message {
                 }
                 AddressType::Channel => {
                     s = "Channel".to_string();
+                }
+                AddressType::Worker => {
+                    s = "Worker".to_string();
                 }
                 AddressType::Undefined => {
                     s = "Undefined".to_string();
@@ -176,6 +196,21 @@ pub mod message {
             let t: u8 = *self as u8;
             let o = *other as u8;
             o == t
+        }
+    }
+
+    impl TryFrom<u8> for MessageType {
+        type Error = String;
+        fn try_from(data: u8) -> Result<Self, Self::Error> {
+            match data {
+                0 => Ok(MessageType::Ping),
+                1 => Ok(MessageType::Pong),
+                2 => Ok(MessageType::Payload),
+                3 => Ok(MessageType::KeyAgreementM1),
+                4 => Ok(MessageType::KeyAgreementM2),
+                5 => Ok(MessageType::KeyAgreementM3),
+                _ => Err("Unknown message type".to_string()),
+            }
         }
     }
 
@@ -195,10 +230,10 @@ pub mod message {
         fn try_from(data: u8) -> Result<Self, Self::Error> {
             match data {
                 255 => Ok(AddressType::Undefined),
-                0 => Ok(AddressType::Local),
                 1 => Ok(AddressType::Tcp),
                 2 => Ok(AddressType::Udp),
                 129 => Ok(AddressType::Channel),
+                0 => Ok(AddressType::Worker),
                 _ => Err("Unknown address type".to_string()),
             }
         }
@@ -211,9 +246,9 @@ pub mod message {
             v.push(a.length as u8);
 
             match a.a_type {
-                AddressType::Local => {
-                    if let Address::LocalAddress(la) = a.address {
-                        LocalAddress::encode(la, v);
+                AddressType::Worker => {
+                    if let Address::WorkerAddress(mut wa) = a.address {
+                        v.append(&mut wa);
                     }
                 }
                 AddressType::Udp => {
@@ -222,8 +257,8 @@ pub mod message {
                     }
                 }
                 AddressType::Channel => {
-                    if let Address::ChannelAddress(a) = a.address {
-                        v.append(&mut a.to_le_bytes().to_vec());
+                    if let Address::ChannelAddress(mut a) = a.address {
+                        v.append(&mut a);
                     }
                 }
                 _ => {}
@@ -240,15 +275,27 @@ pub mod message {
             }
             match a_type {
                 AddressType::Channel => {
-                    let address =
-                        Address::ChannelAddress(u32::from_le_bytes([u[2], u[3], u[4], u[5]]));
+                    let length = u[1] as usize;
+                    let addr: Vec<u8> = u[2..(length + 2)].to_vec();
                     Ok((
                         RouterAddress {
                             a_type: AddressType::Channel,
-                            length: u[1],
-                            address,
+                            length: addr.len() as u8,
+                            address: Address::ChannelAddress(addr),
                         },
-                        &u[6..],
+                        &u[(length + 2)..],
+                    ))
+                }
+                AddressType::Worker => {
+                    let length = u[1] as usize;
+                    let addr: Vec<u8> = u[2..(length + 2)].to_vec();
+                    Ok((
+                        RouterAddress {
+                            a_type: AddressType::Worker,
+                            length: addr.len() as u8,
+                            address: Address::WorkerAddress(addr),
+                        },
+                        &u[(length + 2)..],
                     ))
                 }
                 AddressType::Udp => {
@@ -327,44 +374,47 @@ pub mod message {
         }
     }
 
-    impl Codec for LocalAddress {
-        type Inner = LocalAddress;
-        fn encode(la: LocalAddress, u: &mut Vec<u8>) -> Result<(), String> {
-            for le_byte in la.address.to_le_bytes().iter() {
-                u.push(*le_byte);
+    impl Route {
+        pub fn print_route(&self) {
+            for a in &self.addresses {
+                match &a.address {
+                    Address::UdpAddress(udp) => {
+                        println!("Udp: {}", udp.to_string());
+                    }
+                    Address::WorkerAddress(wa) => {
+                        println!("Worker: {}", hex::encode(wa));
+                    }
+                    Address::ChannelAddress(ca) => {
+                        println!("Channel: {}", hex::encode(ca));
+                    }
+                    _ => {
+                        println!("print_route not implementd for type");
+                    }
+                }
             }
-            Ok(())
-        }
-        fn decode(u: &[u8]) -> Result<(LocalAddress, &[u8]), String> {
-            Ok((
-                LocalAddress {
-                    address: u32::from_le_bytes([u[0], u[1], u[2], u[3]]),
-                },
-                &u[4..],
-            ))
         }
     }
 
     impl RouterAddress {
         pub fn size_of(&self) -> u8 {
-            match self.address {
-                Address::LocalAddress(a) => 4,
+            match &self.address {
+                Address::WorkerAddress(a) => a.len() as u8,
                 Address::UdpAddress(_unused) => 7,
-                Address::ChannelAddress(a) => 4,
+                Address::ChannelAddress(a) => a.len() as u8,
                 _ => 0,
             }
         }
         pub fn from_address(a: Address) -> Option<RouterAddress> {
-            match a {
+            match &a {
                 Address::UdpAddress(sock_addr) => Some(RouterAddress {
                     a_type: AddressType::Udp,
                     length: a.size_of(),
-                    address: Address::UdpAddress(sock_addr),
+                    address: Address::UdpAddress(*sock_addr),
                 }),
-                Address::ChannelAddress(_unused) => Some(RouterAddress {
+                Address::ChannelAddress(ca) => Some(RouterAddress {
                     a_type: AddressType::Channel,
-                    length: a.size_of(),
-                    address: a,
+                    length: ca.len() as u8,
+                    address: Address::ChannelAddress(ca.clone()),
                 }),
                 _ => None,
             }
@@ -379,12 +429,25 @@ pub mod message {
                 Err(_unused) => Err("failed to parse router address".to_string()),
             }
         }
-        pub fn channel_router_address_from_u32(a: u32) -> Result<RouterAddress, String> {
-            Ok(RouterAddress {
-                a_type: AddressType::Channel,
-                length: 4,
-                address: Address::ChannelAddress(a),
-            })
+        pub fn channel_router_address_from_str(a: &str) -> Result<RouterAddress, String> {
+            match hex::decode(a) {
+                Ok(h) => Ok(RouterAddress {
+                    a_type: AddressType::Channel,
+                    length: h.len() as u8,
+                    address: Address::ChannelAddress(h),
+                }),
+                Err(_unused) => Err("string contains non-hex chars".to_string()),
+            }
+        }
+        pub fn worker_router_address_from_str(a: &str) -> Result<RouterAddress, String> {
+            match hex::decode(a) {
+                Ok(h) => Ok(RouterAddress {
+                    a_type: AddressType::Worker,
+                    length: h.len() as u8,
+                    address: Address::WorkerAddress(h),
+                }),
+                Err(_unused) => Err("string contains non-hex chars".to_string()),
+            }
         }
     }
 
@@ -414,7 +477,7 @@ pub mod message {
             } else {
                 u.push(route.addresses.len() as u8);
                 for i in 0..route.addresses.len() {
-                    RouterAddress::encode(route.addresses[i], u);
+                    RouterAddress::encode(route.addresses[i].clone(), u);
                 }
             }
             Ok(())
@@ -549,27 +612,6 @@ mod tests {
     }
 
     #[test]
-    fn local_address_codec() {
-        let mut local_in = LocalAddress {
-            address: 0x00010203,
-        };
-        let mut v: Vec<u8> = vec![];
-        LocalAddress::encode(local_in, &mut v);
-        assert_eq!(v, [3, 2, 1, 0]);
-        match LocalAddress::decode(&v) {
-            Ok((local_out, w)) => assert_eq!(
-                local_out,
-                LocalAddress {
-                    address: 0x00010203
-                }
-            ),
-            Err(s) => {
-                println!("{:?}", s);
-            }
-        }
-    }
-
-    #[test]
     fn ip4_address_codec() {
         let mut v: Vec<u8> = vec![];
         let mut ip4a: IpAddr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
@@ -588,18 +630,20 @@ mod tests {
 
     #[test]
     fn address_codec() {
+        // Socket address
         let sa = SocketAddr::from_str("127.0.0.1:32896").unwrap();
         let mut udp_address = Address::UdpAddress(sa);
         let mut router_address = RouterAddress {
             a_type: AddressType::Udp,
             length: 0,
-            address: udp_address,
+            address: udp_address.clone(),
         };
         assert_eq!(udp_address.as_string(), "127.0.0.1:32896");
         router_address.length = router_address.size_of();
         let mut v: Vec<u8> = vec![];
         RouterAddress::encode(router_address, &mut v);
         assert_eq!(v, vec![2, 7, 0, 127, 0, 0, 1, 0x80, 0x80]);
+
         let mut v = vec![2, 7, 0, 127, 0, 0, 1, 0x80, 0x80];
         match RouterAddress::decode(&mut v) {
             Ok((ra, w)) => {
@@ -624,16 +668,14 @@ mod tests {
                 println!("{}", s);
             }
         }
-        let mut channel_address = Address::ChannelAddress(0x00010203);
-        let mut router_address = RouterAddress {
-            a_type: AddressType::Channel,
-            length: 0,
-            address: channel_address,
-        };
-        router_address.length = router_address.size_of();
+
+        // Channel address
+        let mut router_channel_address =
+            RouterAddress::channel_router_address_from_str("00010203").unwrap();
         let mut v: Vec<u8> = vec![];
-        RouterAddress::encode(router_address, &mut v);
-        assert_eq!(v, vec![129, 4, 3, 2, 1, 0]);
+        RouterAddress::encode(router_channel_address, &mut v);
+        assert_eq!(v, vec![129, 4, 0, 1, 2, 3]);
+
         let mut v = vec![129, 4, 3, 2, 1, 0];
         match RouterAddress::decode(&mut v) {
             Ok((ra, _unused)) => {
@@ -641,7 +683,7 @@ mod tests {
                 assert_eq!(ra.length, 4);
                 match ra.address {
                     Address::ChannelAddress(c) => {
-                        assert_eq!(c, 0x00010203);
+                        assert_eq!(c, vec![3 as u8, 2 as u8, 1 as u8, 0 as u8]);
                     }
                     _ => {}
                 }
@@ -675,7 +717,7 @@ mod tests {
         router_address.length = router_address.size_of();
         route.addresses.push(router_address);
 
-        let mut channel_address = Address::ChannelAddress(0x00010203);
+        let mut channel_address = Address::ChannelAddress(vec![0, 1, 2, 3]);
         let mut router_address = RouterAddress {
             a_type: AddressType::Channel,
             length: 0,
@@ -689,8 +731,8 @@ mod tests {
         assert_eq!(
             v,
             vec![
-                3, 2, 7, 0, 127, 0, 0, 1, 0x80, 0x80, 2, 7, 0, 10, 0, 1, 10, 0x90, 0x80, 129, 4, 3,
-                2, 1, 0
+                3, 2, 7, 0, 127, 0, 0, 1, 0x80, 0x80, 2, 7, 0, 10, 0, 1, 10, 0x90, 0x80, 129, 4, 0,
+                1, 2, 3
             ]
         );
         match Route::decode(&v) {
@@ -744,9 +786,9 @@ mod tests {
                 match r.addresses[2].a_type {
                     AddressType::Channel => {
                         assert_eq!(r.addresses[2].length, 4);
-                        match r.addresses[2].address {
+                        match &r.addresses[2].address {
                             Address::ChannelAddress(a) => {
-                                assert_eq!(a, 0x00010203);
+                                assert_eq!(a, &vec![0 as u8, 1 as u8, 2 as u8, 3 as u8]);
                             }
                             _ => {
                                 assert!(false);
@@ -855,7 +897,7 @@ mod tests {
         router_address.length = router_address.size_of();
         onward_route.addresses.push(router_address);
 
-        let mut channel_address = Address::ChannelAddress(0x00010203);
+        let mut channel_address = Address::ChannelAddress(vec![0, 1, 2, 3]);
         let mut router_address = RouterAddress {
             a_type: AddressType::Channel,
             length: 0,
@@ -885,7 +927,7 @@ mod tests {
         router_address.length = router_address.size_of();
         return_route.addresses.push(router_address);
 
-        let mut channel_address = Address::ChannelAddress(0x00010203);
+        let mut channel_address = Address::ChannelAddress(vec![0, 1, 2, 3]);
         let mut router_address = RouterAddress {
             a_type: AddressType::Channel,
             length: 0,
@@ -894,10 +936,11 @@ mod tests {
         router_address.length = router_address.size_of();
         return_route.addresses.push(router_address);
 
-        let mut message_body = vec![0];
+        let mut message_body = vec![1, 1, 1, 1];
         let mut msg = Message {
             onward_route,
             return_route,
+            message_type: MessageType::Payload,
             message_body,
         };
         let mut u: Vec<u8> = vec![];
@@ -905,9 +948,9 @@ mod tests {
         assert_eq!(
             u,
             vec![
-                3, 2, 7, 0, 127, 0, 0, 1, 0x80, 0x80, 2, 7, 0, 10, 0, 1, 10, 0x90, 0x80, 129, 4, 3,
-                2, 1, 0, 3, 2, 7, 0, 127, 0, 0, 1, 0x80, 0x80, 2, 7, 0, 10, 0, 1, 10, 0x90, 0x80,
-                129, 4, 3, 2, 1, 0, 0,
+                1, 3, 2, 7, 0, 127, 0, 0, 1, 0x80, 0x80, 2, 7, 0, 10, 0, 1, 10, 0x90, 0x80, 129, 4,
+                0, 1, 2, 3, 3, 2, 7, 0, 127, 0, 0, 1, 0x80, 0x80, 2, 7, 0, 10, 0, 1, 10, 0x90,
+                0x80, 129, 4, 0, 1, 2, 3, 2, 1, 1, 1, 1,
             ]
         );
 
@@ -962,9 +1005,9 @@ mod tests {
                 match m.onward_route.addresses[2].a_type {
                     AddressType::Channel => {
                         assert_eq!(m.onward_route.addresses[2].length, 4);
-                        match m.onward_route.addresses[2].address {
+                        match &m.onward_route.addresses[2].address {
                             Address::ChannelAddress(a) => {
-                                assert_eq!(a, 0x00010203);
+                                assert_eq!(a, &vec![0 as u8, 1 as u8, 2 as u8, 3 as u8]);
                             }
                             _ => {
                                 assert!(false);
@@ -975,7 +1018,8 @@ mod tests {
                         assert!(false);
                     }
                 }
-                assert_eq!(m.message_body[0], 0);
+                assert_eq!(m.message_type as u8, MessageType::Payload as u8);
+                assert_eq!(&m.message_body[0..4], [1, 1, 1, 1]);
             }
             _ => {}
         }

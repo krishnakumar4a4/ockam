@@ -47,7 +47,6 @@ pub mod router {
                             self.route(m, MessageDirection::Receive);
                         }
                         OckamCommand::Router(RouterCommand::SendMessage(m)) => {
-                            println!("Routing");
                             got = true;
                             self.route(m, MessageDirection::Send);
                         }
@@ -64,7 +63,7 @@ pub mod router {
                 return Err("no route supplied".to_string());
             }
 
-            let destination_address = m.onward_route.addresses[0];
+            let destination_address = m.onward_route.addresses[0].clone();
             let address_type = destination_address.a_type;
             let handler_tx = match &self.registry[address_type as usize] {
                 Some(a) => a,
@@ -78,6 +77,16 @@ pub mod router {
                     }
                     MessageDirection::Send => {
                         handler_tx.send(OckamCommand::Channel(ChannelCommand::SendMessage(m)));
+                        Ok(())
+                    }
+                },
+                AddressType::Worker => match direction {
+                    MessageDirection::Receive => {
+                        handler_tx.send(OckamCommand::Worker(WorkerCommand::ReceiveMessage(m)));
+                        Ok(())
+                    }
+                    MessageDirection::Send => {
+                        handler_tx.send(OckamCommand::Worker(WorkerCommand::SendMessage(m)));
                         Ok(())
                     }
                 },
@@ -254,13 +263,13 @@ pub mod router {
 //             if !m.onward_route.addresses.is_empty() {
 //                 address = m.onward_route.addresses[0];
 //                 match address {
-//                     Address::LocalAddress(t, _l, _0) => {
+//                     Address::LocalAddress(t, _l, _unused) => {
 //                         address_type = t as u8;
 //                     }
-//                     Address::UdpAddress(t, _l, _0, _1) => {
+//                     Address::UdpAddress(t, _l, _unused, _1) => {
 //                         address_type = t as u8;
 //                     }
-//                     Address::TcpAddress(t, _l, _0, _1) => {
+//                     Address::TcpAddress(t, _l, _unused, _1) => {
 //                         address_type = t as u8;
 //                     }
 //                 }
