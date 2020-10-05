@@ -1,6 +1,6 @@
 use super::{
     CompletedKeyExchange, HandshakeStateData, KeyExchange, KeyExchanger, SymmetricStateData,
-    AES256_KEYSIZE, SHA256_SIZE,
+    SHA256_SIZE,
 };
 use crate::error::KexExchangeFailError;
 use crate::NewKeyExchanger;
@@ -48,7 +48,7 @@ impl SymmetricState {
             nonce: 0,
             state: SymmetricStateData {
                 h: [0u8; 32],
-                ck: [0u8; 32],
+                ck: None,
             },
             vault,
         }
@@ -84,7 +84,12 @@ impl KeyExchange for SymmetricState {
         // mix_hash(xx, NULL, 0);
         let mut h = [0u8; SHA256_SIZE];
         h[..Self::CSUITE.len()].copy_from_slice(Self::CSUITE);
-        let ck = h;
+        let attributes = SecretKeyAttributes {
+            xtype: SecretKeyType::Buffer(SHA256_SIZE),
+            persistence: SecretPersistenceType::Ephemeral,
+            purpose: SecretPurposeType::KeyAgreement,
+        };
+        let ck = vault.secret_import(&SecretKey::Buffer(h.to_vec()), attributes)?;
         let h = vault.sha256(&h)?;
 
         self.handshake = HandshakeStateData {
@@ -97,7 +102,7 @@ impl KeyExchange for SymmetricState {
         };
         self.key = None;
         self.nonce = 0;
-        self.state = SymmetricStateData { h, ck };
+        self.state = SymmetricStateData { h, ck: Some(ck) };
         Ok(())
     }
 
@@ -106,31 +111,43 @@ impl KeyExchange for SymmetricState {
         &mut self,
         secret_handle: SecretKeyContext,
         public_key: PublicKey,
-    ) -> Result<Vec<u8>, VaultFailError> {
+    ) -> Result<Vec<SecretKeyContext>, VaultFailError> {
         let mut vault = self.vault.lock().unwrap();
+
+        let attributes_ck = SecretKeyAttributes {
+            xtype: SecretKeyType::Buffer(32),
+            purpose: SecretPurposeType::KeyAgreement,
+            persistence: SecretPersistenceType::Ephemeral,
+        };
+
+        let attributes_k = SecretKeyAttributes {
+            xtype: SecretKeyType::Aes256,
+            purpose: SecretPurposeType::KeyAgreement,
+            persistence: SecretPersistenceType::Ephemeral,
+        };
+
         vault.ec_diffie_hellman_hkdf_sha256(
             secret_handle,
             public_key,
-            self.state.ck.as_ref(),
-            SHA256_SIZE + AES256_KEYSIZE,
+            self.state.ck.unwrap(),
+            vec![attributes_ck, attributes_k],
         )
     }
 
     /// mix key step in Noise protocol
-    fn mix_key<B: AsRef<[u8]>>(&mut self, hash: B) -> Result<(), VaultFailError> {
-        let hash = hash.as_ref();
-        self.state.ck.copy_from_slice(&hash[..SHA256_SIZE]);
-        let attributes = SecretKeyAttributes {
-            xtype: SecretKeyType::Aes256,
-            persistence: SecretPersistenceType::Ephemeral,
-            purpose: SecretPurposeType::KeyAgreement,
-        };
-        let key = SecretKey::Aes256(*array_ref![hash, SHA256_SIZE, AES256_KEYSIZE]);
+    fn mix_key(&mut self, hkdf_output: Vec<SecretKeyContext>) -> Result<(), VaultFailError> {
         let mut vault = self.vault.lock().unwrap();
+
+        if self.state.ck.is_some() {
+            vault.secret_destroy(self.state.ck.unwrap())?;
+        }
+        self.state.ck = Some(hkdf_output[0]);
+
         if self.key.is_some() {
             vault.secret_destroy(*self.key.as_ref().unwrap())?;
         }
-        self.key = Some(vault.secret_import(&key, attributes)?);
+        // FIXME
+        self.key = Some(hkdf_output[1]);
         self.nonce = 0;
         Ok(())
     }
@@ -188,35 +205,22 @@ impl KeyExchange for SymmetricState {
     }
 
     /// Split step in Noise protocol
-    fn split(&mut self) -> Result<Vec<u8>, VaultFailError> {
+    fn split(&mut self) -> Result<Vec<SecretKeyContext>, VaultFailError> {
         let mut vault = self.vault.lock().unwrap();
-        vault.hkdf_sha256(self.state.ck.as_ref(), &[], AES256_KEYSIZE + AES256_KEYSIZE)
-    }
-
-    /// Set this state up to send and receive messages
-    fn finalize<B: AsRef<[u8]>, C: AsRef<[u8]>>(
-        &mut self,
-        encrypt_ref: B,
-        decrypt_ref: C,
-    ) -> Result<CompletedKeyExchange, VaultFailError> {
-        let encrypt_ref = encrypt_ref.as_ref();
-        let decrypt_ref = decrypt_ref.as_ref();
-        debug_assert_eq!(encrypt_ref.len(), AES256_KEYSIZE);
-        debug_assert_eq!(decrypt_ref.len(), AES256_KEYSIZE);
-        let mut decrypt = [0u8; AES256_KEYSIZE];
-        let mut encrypt = [0u8; AES256_KEYSIZE];
-        decrypt.copy_from_slice(encrypt_ref);
-        encrypt.copy_from_slice(decrypt_ref);
-        let decrypt = SecretKey::Aes256(decrypt);
-        let encrypt = SecretKey::Aes256(encrypt);
         let attributes = SecretKeyAttributes {
             xtype: SecretKeyType::Aes256,
             purpose: SecretPurposeType::KeyAgreement,
             persistence: SecretPersistenceType::Ephemeral,
         };
-        let mut vault = self.vault.lock().unwrap();
-        let decrypt_key = vault.secret_import(&decrypt, attributes)?;
-        let encrypt_key = vault.secret_import(&encrypt, attributes)?;
+        vault.hkdf_sha256(self.state.ck.unwrap(), None, vec![attributes.clone(), attributes])
+    }
+
+    /// Set this state up to send and receive messages
+    fn finalize(
+        &mut self,
+        encrypt_key: SecretKeyContext,
+        decrypt_key: SecretKeyContext,
+    ) -> Result<CompletedKeyExchange, VaultFailError> {
         Ok(CompletedKeyExchange {
             h: self.state.h,
             encrypt_key,
@@ -262,12 +266,12 @@ impl Initiator {
 
         self.0.mix_hash(&re)?;
         let hash = self.0.dh(self.0.handshake.ephemeral_secret_handle, re)?;
-        self.0.mix_key(&hash)?;
+        self.0.mix_key(hash)?;
         let rs = self.0.decrypt_and_mix_hash(encrypted_rs_and_tag)?;
         let rs = PublicKey::Curve25519(*array_ref![rs, 0, 32]);
         self.0.handshake.remote_static_public_key = Some(rs);
         let hash = self.0.dh(self.0.handshake.ephemeral_secret_handle, rs)?;
-        self.0.mix_key(&hash)?;
+        self.0.mix_key(hash)?;
         let payload = self.0.decrypt_and_mix_hash(encrypted_payload_and_tag)?;
         Ok(payload)
     }
@@ -289,7 +293,7 @@ impl Initiator {
                 .as_ref()
                 .unwrap(),
         )?;
-        self.0.mix_key(&hash)?;
+        self.0.mix_key(hash)?;
         let mut encrypted_payload_and_tag = self.0.encrypt_and_mix_hash(payload)?;
         encrypted_s_and_tag.append(&mut encrypted_payload_and_tag);
         Ok(encrypted_s_and_tag)
@@ -300,7 +304,7 @@ impl Initiator {
     pub fn finalize(&mut self) -> Result<CompletedKeyExchange, VaultFailError> {
         let keys = self.0.split()?;
         self.0
-            .finalize(&keys[AES256_KEYSIZE..], &keys[..AES256_KEYSIZE])
+            .finalize(keys[0], keys[1])
     }
 }
 
@@ -341,7 +345,7 @@ impl Responder {
                 .as_ref()
                 .unwrap(),
         )?;
-        self.0.mix_key(&hash)?;
+        self.0.mix_key(hash)?;
 
         let mut encrypted_s_and_tag = self
             .0
@@ -355,7 +359,7 @@ impl Responder {
                 .as_ref()
                 .unwrap(),
         )?;
-        self.0.mix_key(&hash)?;
+        self.0.mix_key(hash)?;
         let mut encrypted_payload_and_tag = self.0.encrypt_and_mix_hash(payload)?;
 
         let mut output = self.0.handshake.ephemeral_public_key.as_ref().to_vec();
@@ -384,7 +388,7 @@ impl Responder {
     pub fn finalize(&mut self) -> Result<CompletedKeyExchange, VaultFailError> {
         let keys = self.0.split()?;
         self.0
-            .finalize(&keys[..AES256_KEYSIZE], &keys[AES256_KEYSIZE..])
+            .finalize(keys[0], keys[1])
     }
 }
 
