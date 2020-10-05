@@ -3,11 +3,16 @@ use ockam_common::commands::ockam_commands::*;
 use ockam_message::message::*;
 use ockam_router::router::*;
 use ockam_transport::transport::*;
+use ockam_channel::*;
+use ockam_vault::software::DefaultVault;
 use std::net::SocketAddr;
 use std::str;
 use std::str::FromStr;
 use std::{thread, time};
 use structopt::StructOpt;
+use std::sync::{Arc, Mutex};
+use ockam_message::message::Address::ChannelAddress;
+use ockam_kex::xx::{XXInitiator, XXResponder};
 
 #[derive(StructOpt, Debug)]
 #[structopt(author = "Ockam Developers (ockam.io)")]
@@ -37,6 +42,9 @@ pub struct TestWorker {
     rx: std::sync::mpsc::Receiver<OckamCommand>,
     _tx: std::sync::mpsc::Sender<OckamCommand>,
     router_tx: std::sync::mpsc::Sender<OckamCommand>,
+    address: Address,
+    channel_address: Address,
+    pending_message: Option<Message>,
     toggle: u16,
 }
 
@@ -45,6 +53,7 @@ impl TestWorker {
         rx: std::sync::mpsc::Receiver<OckamCommand>,
         tx: std::sync::mpsc::Sender<OckamCommand>,
         router_tx: std::sync::mpsc::Sender<OckamCommand>,
+        channel_address: Option<Address>,
     ) -> Self {
         if let Err(_error) = router_tx.send(OckamCommand::Router(RouterCommand::Register(
             AddressType::Worker,
@@ -52,11 +61,114 @@ impl TestWorker {
         ))) {
             println!("send failed in TestChannel::new")
         }
+        let mut channel = Address::ChannelAddress(vec![0,0,0,0]);
+        match channel_address {
+            Some(ca) => { channel = ca; }
+            _ => {}
+        }
         TestWorker {
             rx,
             _tx: tx,
             router_tx,
+            address: Address::WorkerAddress(vec![0,1,2,3]),
+            channel_address: channel,
+            pending_message: None,
             toggle: 0,
+        }
+    }
+
+    pub fn request_channel(&mut self, mut m: Message) -> Result<(), String> {
+        let pending_message = Message {
+            onward_route: Route{ addresses: vec![] },
+            return_route: m.return_route.clone(),
+            message_type: MessageType::Payload,
+            message_body: m.message_body.clone()
+        };
+        self.pending_message = Some(pending_message);
+        m.onward_route.addresses.insert(0, RouterAddress::from_address(self.channel_address.clone()).unwrap());
+        m.return_route.addresses.insert(0, RouterAddress::from_address(self.address.clone()).unwrap());
+        m.message_type = MessageType::None;
+        m.message_body = vec![];
+        self.router_tx.send(OckamCommand::Router(RouterCommand::SendMessage(m)));
+        Ok(())
+    }
+
+    pub fn handle_send(&mut self, mut m: Message) -> Result<(), String> {
+        if self.channel_address.as_string() == "00000000".to_string() {
+            self.request_channel(m)
+        } else {
+            m.onward_route = Route { addresses: vec![RouterAddress::from_address(self.channel_address.clone()).unwrap()] };
+            m.return_route.addresses.insert(0, RouterAddress::from_address(self.address.clone()).unwrap());
+            match self
+                .router_tx
+                .send(OckamCommand::Router(RouterCommand::SendMessage(m)))
+            {
+                Ok(()) => Ok(()),
+                Err(_unused) => {
+                    println!("send to router failed");
+                    Err("handle_send failed in TestWorker".into())
+                }
+            }
+        }
+    }
+
+    pub fn receive_channel(&mut self, m: Message) -> Result<(), String> {
+        // This should be an empty message with 1 return address, that being a secure channel
+        if m.return_route.addresses.len() != 1 { return Err("bad return route".into()); }
+        self.channel_address = m.return_route.addresses[0].address.clone();
+        let m_opt = self.pending_message.clone();
+        match m_opt {
+            Some(mut m) => {
+                let channel = RouterAddress::from_address(self.channel_address.clone()).unwrap();
+                m.onward_route = Route { addresses: vec![channel, RouterAddress::worker_router_address_from_str("00010203").unwrap()] };
+                m.return_route = Route { addresses: vec![RouterAddress::from_address(self.address.clone()).unwrap()]};
+                self.router_tx.send(OckamCommand::Router(RouterCommand::SendMessage(m)));
+                self.pending_message = None;
+                return Ok(());
+            },
+            _ => { return Ok(()); }
+        }
+        Ok(())
+    }
+
+    pub fn handle_receive(&mut self, m: Message) -> Result<(), String> {
+        match m.message_type {
+            MessageType::None => {
+                self.receive_channel(m)
+            }
+            MessageType::Payload => {
+                let s: &str;
+                if 0 == self.toggle % 2 {
+                    s = "Hello Ockam";
+                } else {
+                    s = "Goodbye Ockam"
+                };
+                self.toggle += 1;
+                let mut reply: Message = Message {
+                    onward_route: Route { addresses: vec![] },
+                    return_route: Route { addresses: vec![] },
+                    message_type: MessageType::Payload,
+                    message_body: s.as_bytes().to_vec(),
+                };
+                reply.onward_route.addresses = m.return_route.addresses.clone();
+                if let Ok(r) = RouterAddress::worker_router_address_from_str("01020304") {
+                    reply.return_route.addresses.push(r);
+                } else {
+                    return Err("handle_receive".into());
+                }
+                match self
+                    .router_tx
+                    .send(OckamCommand::Router(RouterCommand::SendMessage(reply)))
+                {
+                    Ok(()) => {}
+                    Err(_unused) => {
+                        println!("send to router failed");
+                        return Err("send to router failed in TestWorker".into());
+                    }
+                }
+                Ok(())
+            }
+            _ => {Err("worker got bad message type".into()) }
         }
     }
 
@@ -68,59 +180,19 @@ impl TestWorker {
             if let Ok(c) = self.rx.try_recv() {
                 got = true;
                 match c {
-                    OckamCommand::Worker(WorkerCommand::SendMessage(mut m)) => {
-                        // encrypt message body here
-                        if let Ok(r) = RouterAddress::worker_router_address_from_str("01020304") {
-                            m.return_route.addresses.push(r);
-                        } else {
-                            return false;
-                        }
-                        match self
-                            .router_tx
-                            .send(OckamCommand::Router(RouterCommand::SendMessage(m)))
-                        {
-                            Ok(()) => {}
-                            Err(_unused) => {
-                                println!("send to router failed");
-                                keep_going = false;
-                            }
-                        }
+                    OckamCommand::Worker(WorkerCommand::Test) => {
+                        println!("Worker got test command");
                     }
-                    OckamCommand::Worker(WorkerCommand::ReceiveMessage(m)) => {
-                        // decrypt message body here
+                    OckamCommand::Worker(WorkerCommand::SendMessage(mut m)) => {
+                        println!("Worker got send");
+                        self.handle_send(m).unwrap();
+                    }
+                    OckamCommand::Worker(WorkerCommand::ReceiveMessage(mut m)) => {
                         println!(
                             "Worker received message: {}",
                             str::from_utf8(&m.message_body).unwrap()
                         );
-                        let s: &str;
-                        if 0 == self.toggle % 2 {
-                            s = "Hello Ockam";
-                        } else {
-                            s = "Goodbye Ockam"
-                        };
-                        self.toggle += 1;
-                        let mut reply: Message = Message {
-                            onward_route: Route { addresses: vec![] },
-                            return_route: Route { addresses: vec![] },
-                            message_type: MessageType::Payload,
-                            message_body: s.as_bytes().to_vec(),
-                        };
-                        reply.onward_route.addresses = m.return_route.addresses.clone();
-                        if let Ok(r) = RouterAddress::worker_router_address_from_str("01020304") {
-                            reply.return_route.addresses.push(r);
-                        } else {
-                            return false;
-                        }
-                        match self
-                            .router_tx
-                            .send(OckamCommand::Router(RouterCommand::SendMessage(reply)))
-                        {
-                            Ok(()) => {}
-                            Err(_unused) => {
-                                println!("send to router failed");
-                                keep_going = false;
-                            }
-                        }
+                        self.handle_receive(m).unwrap();
                     }
                     OckamCommand::Worker(WorkerCommand::Stop) => {
                         keep_going = false;
@@ -148,40 +220,6 @@ pub fn get_route() -> Option<Route> {
     };
 
     Some(r)
-}
-
-fn start_thread(local_address: &str, route: Route, payload: String) {
-    let (transport_tx, transport_rx) = std::sync::mpsc::channel();
-    let (router_tx, router_rx) = std::sync::mpsc::channel();
-    let (channel_tx, channel_rx) = std::sync::mpsc::channel();
-    let channel_tx_for_node = channel_tx.clone();
-    let router_tx_for_channel = router_tx.clone();
-
-    let mut router = Router::new(router_rx);
-    let mut channel = TestWorker::new(channel_rx, channel_tx, router_tx_for_channel);
-
-    let mut transport =
-        UdpTransport::new(transport_rx, transport_tx, router_tx, local_address).unwrap();
-
-    let _join_thread: thread::JoinHandle<_> = thread::spawn(move || {
-        while transport.poll() && router.poll() & channel.poll() {
-            thread::sleep(time::Duration::from_millis(100));
-        }
-    });
-
-    let m = Message {
-        onward_route: route,
-        return_route: Route { addresses: vec![] },
-        message_type: MessageType::Payload,
-        message_body: payload.as_bytes().to_vec(),
-    };
-    let command = OckamCommand::Channel(ChannelCommand::SendMessage(m));
-    match channel_tx_for_node.send(command) {
-        Ok(_unused) => {}
-        Err(_unused) => {
-            println!("failed send to channel");
-        }
-    }
 }
 
 pub fn parse_args(args: Args) -> Result<(RouterAddress, Route, String), String> {
@@ -236,11 +274,16 @@ pub fn start_node(local_socket: RouterAddress, onward_route: Route, payload: Str
     let (transport_tx, transport_rx) = std::sync::mpsc::channel();
     let (router_tx, router_rx) = std::sync::mpsc::channel();
     let (worker_tx, worker_rx) = std::sync::mpsc::channel();
-    let worker_tx_for_node = worker_tx.clone();
-    let router_tx_for_worker = router_tx.clone();
+    let (channel_tx, channel_rx) = std::sync::mpsc::channel();
+    let vault = Arc::new(Mutex::new(DefaultVault::default()));
 
     let mut router = Router::new(router_rx);
-    let mut worker = TestWorker::new(worker_rx, worker_tx, router_tx_for_worker);
+
+    let mut worker = TestWorker::new(
+        worker_rx,
+        worker_tx.clone(),
+        router_tx.clone(),
+        Some(Address::ChannelAddress(vec![0,0,0,0])));
 
     let sock_str: String;
     match local_socket.address {
@@ -252,13 +295,23 @@ pub fn start_node(local_socket: RouterAddress, onward_route: Route, payload: Str
     }
 
     let mut transport =
-        UdpTransport::new(transport_rx, transport_tx, router_tx, &sock_str).unwrap();
+        UdpTransport::new(transport_rx, transport_tx, router_tx.clone(), &sock_str).unwrap();
 
     let _join_thread: thread::JoinHandle<_> = thread::spawn(move || {
-        while transport.poll() && router.poll() & worker.poll() {
+        type XXChannelManager = ChannelManager<XXInitiator, XXResponder, XXInitiator>;
+        let mut channel_handler = XXChannelManager::new(
+            channel_rx,
+            channel_tx.clone(),
+            router_tx.clone(),
+            vault).unwrap();
+
+        while transport.poll() && router.poll() && channel_handler.poll().unwrap() && worker.poll() {
             thread::sleep(time::Duration::from_millis(100));
         }
     });
+
+    let test_cmd = OckamCommand::Worker(WorkerCommand::Test);
+    worker_tx.send(test_cmd);
 
     if !onward_route.addresses.is_empty() && !payload.is_empty() {
         let m = Message {
@@ -268,10 +321,10 @@ pub fn start_node(local_socket: RouterAddress, onward_route: Route, payload: Str
             message_body: payload.as_bytes().to_vec(),
         };
         let command = OckamCommand::Worker(WorkerCommand::SendMessage(m));
-        match worker_tx_for_node.send(command) {
+        match worker_tx.send(command) {
             Ok(_unused) => {}
             Err(_unused) => {
-                println!("failed send to channel");
+                println!("failed send to worker");
             }
         }
     }

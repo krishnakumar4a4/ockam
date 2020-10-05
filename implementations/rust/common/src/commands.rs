@@ -30,13 +30,12 @@ pub mod ockam_commands {
     // channel_tx
     pub enum ChannelCommand {
         Stop,
-        InitializeRoute(Route),
         ReceiveMessage(Message),
         SendMessage(Message),
     }
     pub enum WorkerCommand {
         Stop,
-        InitializeRoute(Route),
+        Test,
         ReceiveMessage(Message),
         SendMessage(Message),
     }

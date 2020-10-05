@@ -2,7 +2,7 @@ use super::{
     CompletedKeyExchange, HandshakeStateData, KeyExchange, KeyExchanger, SymmetricStateData,
     AES256_KEYSIZE, SHA256_SIZE,
 };
-use crate::error::KexExchangeFailError;
+use crate::error::{KexExchangeFailError, KeyExchangeFailErrorKind};
 use crate::NewKeyExchanger;
 use ockam_vault::{
     error::{VaultFailError, VaultFailErrorKind},
@@ -474,14 +474,15 @@ impl KeyExchanger for XXInitiator {
             InitiatorState::DecodeMessage2 => {
                 let msg = self.initiator.decode_message_2(data)?;
                 self.state = InitiatorState::EncodeMessage3;
-                Ok(msg)
-            }
-            InitiatorState::EncodeMessage3 => {
+            //     Ok(msg)
+            // }
+            // InitiatorState::EncodeMessage3 => {
                 let msg = self.initiator.encode_message_3(data)?;
                 self.state = InitiatorState::Done;
                 Ok(msg)
             }
             InitiatorState::Done => Ok(vec![]),
+            _ => { Err(KeyExchangeFailErrorKind::InvalidParam(0).into())}
         }
     }
 
@@ -506,9 +507,9 @@ impl KeyExchanger for XXResponder {
                 }
                 let msg = self.responder.decode_message_1(data)?;
                 self.state = ResponderState::EncodeMessage2;
-                Ok(msg)
-            }
-            ResponderState::EncodeMessage2 => {
+//                Ok(msg)
+//            }
+//            ResponderState::EncodeMessage2 => {
                 let msg = self.responder.encode_message_2(data)?;
                 self.state = ResponderState::DecodeMessage3;
                 Ok(msg)
@@ -519,6 +520,7 @@ impl KeyExchanger for XXResponder {
                 Ok(msg)
             }
             ResponderState::Done => Ok(vec![]),
+            _ => {Err(KeyExchangeFailErrorKind::InvalidParam(0).into())}
         }
     }
 

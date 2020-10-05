@@ -720,6 +720,7 @@ name = "ockam-channel"
 version = "0.1.0"
 dependencies = [
  "failure",
+ "hex",
  "ockam-common",
  "ockam-kex",
  "ockam-message",
@@ -760,10 +761,13 @@ name = "ockam-node"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "ockam-channel",
  "ockam-common",
+ "ockam-kex",
  "ockam-message",
  "ockam-router",
  "ockam-transport",
+ "ockam-vault",
  "structopt",
 ]
 

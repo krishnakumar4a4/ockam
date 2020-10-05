@@ -61,8 +61,8 @@ pub mod transport {
         }
 
         pub fn send_message(&mut self, mut m: Message) -> Result<(), String> {
-            println!("Onward route:");
-            m.onward_route.print_route();
+            // println!("Onward route:");
+            // m.onward_route.print_route();
             let remote_address = m.onward_route.addresses.remove(0);
 
             match self.socket.local_addr() {
@@ -100,8 +100,14 @@ pub mod transport {
                     // println!("{:?}", b);
                     match Message::decode(&buff[0..s]) {
                         Ok((mut m, _unused)) => {
-                            println!("onward route:");
-                            m.onward_route.print_route();
+                            // println!("onward route:");
+                            // m.onward_route.print_route();
+                            // match m.message_type {
+                            //     MessageType::Payload => {
+                            //         println!("Payload: {}", std::str::from_utf8(&m.message_body).unwrap());
+                            //     }
+                            //     _ => {}
+                            // }
                             if m.onward_route.addresses[0].a_type == AddressType::Udp {
                                 match self.send_message(m) {
                                     Err(s) => Err(s),

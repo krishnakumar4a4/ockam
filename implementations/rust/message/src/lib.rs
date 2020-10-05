@@ -26,8 +26,9 @@ pub mod message {
         fn decode(s: &[u8]) -> Result<(Self::Inner, &[u8]), String>;
     }
 
-    #[repr(C)]
+//    #[repr(C)]
     #[derive(Debug)]
+    #[derive(Clone)]
     pub struct Message {
         pub onward_route: Route,
         pub return_route: Route,
@@ -44,6 +45,7 @@ pub mod message {
         KeyAgreementM1 = 3,
         KeyAgreementM2 = 4,
         KeyAgreementM3 = 5,
+        None = 2^15,
     }
 
     impl Default for Message {
@@ -98,7 +100,7 @@ pub mod message {
 
     /* Addresses */
     #[derive(Debug, PartialEq)]
-    #[repr(C)]
+//    #[repr(C)]
     #[derive(Clone)]
     pub struct RouterAddress {
         pub a_type: AddressType,
@@ -119,8 +121,7 @@ pub mod message {
         }
     }
 
-    #[repr(C)]
-    //    #[derive(Clone, Copy, Debug, PartialEq)]
+//    #[repr(C)]
     #[derive(Clone, Debug, PartialEq)]
     pub enum Address {
         //        LocalAddress(u32),
@@ -154,10 +155,8 @@ pub mod message {
     }
 
     #[derive(Copy)]
-    #[repr(u8)]
     pub enum AddressType {
         Undefined = 255,
-        //        Local = 130,
         Tcp = 1,
         Udp = 2,
         Channel = 129,
@@ -228,7 +227,7 @@ pub mod message {
 
     impl TryFrom<u8> for AddressType {
         type Error = String;
-        fn try_from(data: u8) -> Result<Self, Self::Error> {
+        fn try_from(data: u8) -> Result<AddressType, Self::Error> {
             match data {
                 255 => Ok(AddressType::Undefined),
                 1 => Ok(AddressType::Tcp),
@@ -267,7 +266,8 @@ pub mod message {
             Ok(())
         }
         fn decode(u: &[u8]) -> Result<(RouterAddress, &[u8]), String> {
-            let mut a_type = AddressType::Undefined;
+            let mut a_type: AddressType;
+            a_type = AddressType::Undefined;
             match AddressType::try_from(u[0]) {
                 Ok(t) => {
                     a_type = t;
@@ -389,7 +389,7 @@ pub mod message {
                         println!("Channel: {}", hex::encode(ca));
                     }
                     _ => {
-                        println!("print_route not implementd for type");
+                        println!("print_route not implemented for type");
                     }
                 }
             }
@@ -416,6 +416,11 @@ pub mod message {
                     a_type: AddressType::Channel,
                     length: ca.len() as u8,
                     address: Address::ChannelAddress(ca.clone()),
+                }),
+                Address::WorkerAddress(ca) => Some(RouterAddress {
+                    a_type: AddressType::Worker,
+                    length: ca.len() as u8,
+                    address: Address::WorkerAddress(ca.clone()),
                 }),
                 _ => None,
             }
@@ -453,7 +458,7 @@ pub mod message {
     }
 
     /* Routes */
-    #[repr(C)]
+//    #[repr(C)]
     #[derive(Debug)]
     pub struct Route {
         pub addresses: Vec<RouterAddress>,
@@ -548,7 +553,7 @@ pub mod message {
     }
 
     #[derive(Debug)]
-    #[repr(C)]
+//    #[repr(C)]
     pub struct WireProtocolVersion {
         pub v: u16,
     }

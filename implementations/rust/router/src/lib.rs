@@ -5,6 +5,7 @@ pub mod router {
     use std::sync::mpsc::channel;
     use std::sync::{Arc, Mutex};
     use std::{thread, time};
+    use std::convert::TryFrom;
 
     pub struct Router {
         registry: Vec<Option<std::sync::mpsc::Sender<OckamCommand>>>,
@@ -63,13 +64,18 @@ pub mod router {
                 return Err("no route supplied".to_string());
             }
 
+            // println!("routing onward/return: ");
+            // m.onward_route.print_route();
+            // m.return_route.print_route();
             let destination_address = m.onward_route.addresses[0].clone();
             let address_type = destination_address.a_type;
+            let at = address_type as u8;
+            let att = AddressType::try_from(at).unwrap();
             let handler_tx = match &self.registry[address_type as usize] {
                 Some(a) => a,
                 None => return Err("no handler".to_string()),
             };
-            match address_type {
+           match address_type {
                 AddressType::Channel => match direction {
                     MessageDirection::Receive => {
                         handler_tx.send(OckamCommand::Channel(ChannelCommand::ReceiveMessage(m)));
